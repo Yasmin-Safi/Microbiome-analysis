@@ -1,0 +1,1353 @@
+---
+title: "Gut Microbiome Compositional Dynamics in LARC Patients Undergoing Total Neoadjuvant Therapy"
+subtitle: "Complete Microbiome Analysis — Species Level | S1 (Baseline) · S2 (Post-RT) · S3 (Post-CT)"
+author: "King Hussein Cancer Center, Amman, Jordan"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 12
+    fig_height: 7
+    df_print: paged
+  word_document:
+    toc: true
+    toc_depth: 4
+    reference_docx: NULL
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    latex_engine: xelatex
+---
+
+```{css, echo=FALSE}
+body { font-family: Arial, sans-serif; font-size: 14px; }
+h1 { color: #1F4E79; border-bottom: 2px solid #2E75B6; padding-bottom: 6px; }
+h2 { color: #2E75B6; }
+h3 { color: #404040; font-style: italic; }
+.callout {
+  background: #EBF3FB; border-left: 4px solid #1F4E79;
+  padding: 12px 16px; margin: 16px 0; border-radius: 4px;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo        = TRUE,
+  warning     = FALSE,
+  message     = FALSE,
+  fig.align   = "center",
+  dpi         = 180,
+  cache       = FALSE,
+  comment     = "#>"
+)
+```
+
+---
+
+# 1. Setup & Package Loading
+
+```{r packages}
+# ── Core data manipulation ────────────────────────────────────────────────────
+library(tidyverse)      # dplyr, tidyr, ggplot2, readr, stringr, purrr, forcats
+library(readxl)         # read Excel files
+
+# ── Microbiome-specific ───────────────────────────────────────────────────────
+library(vegan)          # diversity(), vegdist(), adonis2(), betadisper()
+library(phyloseq)       # phyloseq object, ordination helpers (optional)
+
+# ── Statistics ────────────────────────────────────────────────────────────────
+library(coin)           # wilcoxon_test() for exact paired tests
+library(rstatix)        # wilcox_test(), kruskal_test(), cohens_d(), add_significance()
+library(dunn.test)      # Dunn post-hoc for Kruskal-Wallis
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+library(ggpubr)         # stat_compare_means(), ggarrange()
+library(ggrepel)        # geom_label_repel() for volcano labels
+library(pheatmap)       # heatmaps
+library(RColorBrewer)   # colour palettes
+library(patchwork)      # combine ggplots
+library(scales)         # percent_format()
+
+# ── Tables ────────────────────────────────────────────────────────────────────
+library(knitr)
+library(kableExtra)
+library(gt)
+library(gtsummary)      # tbl_summary() for demographics
+
+# ── Optional: install if missing ─────────────────────────────────────────────
+# install.packages(c("vegan","phyloseq","rstatix","ggpubr","ggrepel",
+#                    "pheatmap","patchwork","gtsummary","gt","dunn.test","coin"))
+```
+
+---
+
+# 2. Global Settings
+
+```{r globals}
+# ── Colour palette ────────────────────────────────────────────────────────────
+PAL   <- c(S1 = "#1565C0", S2 = "#E65100", S3 = "#2E7D32")
+LBLS  <- c(S1 = "S1 (Baseline)", S2 = "S2 (Post-RT)", S3 = "S3 (Post-CT)")
+
+TP_LEVELS <- c("S1", "S2", "S3")
+
+# ── ggplot2 theme ─────────────────────────────────────────────────────────────
+theme_larc <- function(base_size = 12) {
+  theme_bw(base_size = base_size) +
+    theme(
+      panel.background  = element_rect(fill = "#FAFAFA"),
+      plot.title        = element_text(face = "bold", size = base_size + 2,
+                                       colour = "#1F4E79"),
+      plot.subtitle     = element_text(colour = "#555555", size = base_size - 1),
+      axis.title        = element_text(face = "bold"),
+      legend.position   = "right",
+      legend.background = element_rect(fill = "white", colour = "#CCCCCC"),
+      strip.background  = element_rect(fill = "#2E75B6"),
+      strip.text        = element_text(colour = "white", face = "bold"),
+      panel.grid.minor  = element_blank()
+    )
+}
+theme_set(theme_larc())
+```
+
+---
+
+# 3. Data Loading & Preprocessing
+
+```{r load-data}
+# ── File paths — adjust if running locally ────────────────────────────────────
+PATH_COUNT  <- "Taxonomy_abundance_count.xlsx"
+PATH_RATIO  <- "Taxonomy_abundance_ratio.xlsx"
+PATH_PATIENT <- "patient_data.xlsx"
+
+# ── Read abundance tables ─────────────────────────────────────────────────────
+cnt_raw <- read_excel(PATH_COUNT,  sheet = "Species")
+rat_raw <- read_excel(PATH_RATIO,  sheet = "Species")
+
+# ── Read clinical data ────────────────────────────────────────────────────────
+patient_df   <- read_excel(PATH_PATIENT, sheet = "Patient data")
+sample_map   <- read_excel(PATH_PATIENT, sheet = "Sample Numb")
+
+# ── Clean patient data column names ──────────────────────────────────────────
+patient_df <- patient_df %>%
+  rename(
+    case_id          = `Case ID`,
+    antibiotics      = `Use Of antibiotics During nCRT`,
+    diagnosis        = `Diagnoses`,
+    age              = `Age`,
+    gender           = `Gender`,
+    bmi              = `BMI`,
+    education        = `Education Level `,
+    occupation       = `occupation `,
+    comorbidity_yn   = `COMOR(Y/N)`,
+    comorbidity_type = `Comorbidity`,
+    marital_status   = `Martial Status`,
+    smoking          = `Smoking`,
+    tumor_location   = `Tumor Location `,
+    tumor_size       = `TUMOR SIZE`,
+    cT               = `Ct`,
+    cN               = `Cn`,
+    stage            = `stage `,
+    rt_type          = `Raidotherapy Type`,
+    rt_dose          = `Regional Dose  of radiotherapy `,
+    rt_course        = `Short or Long Course  of radiotherapy `,
+    chemo_type       = `Chemotherapy type `,
+    chemo_cycles     = `cycle`,
+    weight_baseline  = `Weight Baseline`,
+    weight_post      = `Weight Post  Radio(chemo)therapy`,
+    clinical_response = `Clinical Response (MRI) (NA = Death)`,
+    watchandwait     = `W&W`,
+    surgery_yn       = `Surgery (Y/N)`,
+    surgery_mode     = `Surgery Mod`
+  )
+```
+
+```{r build-matrices}
+# ── Identify sample columns ───────────────────────────────────────────────────
+all_samp_cols <- names(cnt_raw)[str_detect(names(cnt_raw), "\\.")]
+S1_cols <- all_samp_cols[str_ends(all_samp_cols, "S1")]
+S2_cols <- all_samp_cols[str_ends(all_samp_cols, "S2")]
+S3_cols <- all_samp_cols[str_ends(all_samp_cols, "S3")]
+all_cols <- c(S1_cols, S2_cols, S3_cols)
+
+cat(sprintf("Timepoints: S1 = %d  |  S2 = %d  |  S3 = %d  |  Total = %d\n",
+            length(S1_cols), length(S2_cols), length(S3_cols), length(all_cols)))
+
+# ── Species names (clean) ─────────────────────────────────────────────────────
+sp_names <- cnt_raw$Species %>%
+  str_replace("^__", "") %>%
+  make.unique()           # ensure no duplicate names
+
+# ── Abundance matrices: rows = samples, cols = species ───────────────────────
+cnt_mat <- cnt_raw[, all_cols] %>% t() %>% as.data.frame()
+rat_mat <- rat_raw[, all_cols] %>% t() %>% as.data.frame()
+colnames(cnt_mat) <- sp_names
+colnames(rat_mat) <- sp_names
+
+# ── Sample metadata ───────────────────────────────────────────────────────────
+meta_df <- tibble(
+  sample_id  = all_cols,
+  timepoint  = factor(
+    case_when(
+      str_ends(all_cols, "S1") ~ "S1",
+      str_ends(all_cols, "S2") ~ "S2",
+      str_ends(all_cols, "S3") ~ "S3"
+    ),
+    levels = TP_LEVELS
+  ),
+  patient_id = str_extract(all_cols, "^[0-9]+")
+)
+
+cat(sprintf("Species detected: %d\n", ncol(cnt_mat)))
+cat(sprintf("Paired patients (all 3 TPs): %d\n",
+            meta_df %>% group_by(patient_id) %>%
+              summarise(n = n_distinct(timepoint)) %>%
+              filter(n == 3) %>% nrow()))
+```
+
+---
+
+# 4. Demographic Summary
+
+```{r demographics, results='asis'}
+# ── Summary table using gtsummary ─────────────────────────────────────────────
+patient_df %>%
+  select(age, gender, bmi, smoking, comorbidity_yn,
+         tumor_location, cT, cN, stage,
+         chemo_type, weight_baseline, weight_post,
+         clinical_response, watchandwait, surgery_yn) %>%
+  tbl_summary(
+    label = list(
+      age              ~ "Age (years)",
+      gender           ~ "Gender",
+      bmi              ~ "BMI (kg/m²)",
+      smoking          ~ "Smoking",
+      comorbidity_yn   ~ "Comorbidity (any)",
+      tumor_location   ~ "Tumour location",
+      cT               ~ "Clinical T stage",
+      cN               ~ "Clinical N stage",
+      stage            ~ "Overall clinical stage",
+      chemo_type       ~ "Chemotherapy regimen",
+      weight_baseline  ~ "Baseline weight (kg)",
+      weight_post      ~ "Post-treatment weight (kg)",
+      clinical_response ~ "Clinical response (MRI)",
+      watchandwait     ~ "Watch-and-wait strategy",
+      surgery_yn       ~ "Proceeded to surgery"
+    ),
+    statistic = list(
+      all_continuous()  ~ "{mean} ± {sd}  (range: {min}–{max})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    missing_text = "Not recorded"
+  ) %>%
+  bold_labels() %>%
+  as_gt() %>%
+  gt::tab_header(
+    title    = "Table S1. Baseline demographic and clinical characteristics",
+    subtitle = "LARC patients receiving TNT  (n = 62)"
+  ) %>%
+  gt::tab_style(
+    style = gt::cell_fill(color = "#EBF3FB"),
+    locations = gt::cells_column_labels()
+  )
+```
+
+---
+
+# 5. Alpha-Diversity Analysis
+
+## 5.1 Compute Diversity Metrics
+
+```{r alpha-compute}
+# ── Alpha diversity from relative abundance (Shannon, Simpson, Evenness) ──────
+# ── Alpha diversity from counts (Observed, Chao1) ────────────────────────────
+
+alpha_df <- meta_df %>%
+  mutate(
+    Shannon  = vegan::diversity(rat_mat, index = "shannon"),
+    Simpson  = vegan::diversity(rat_mat, index = "invsimpson") %>%
+                 { 1 - 1/. },                      # convert InvSimpson → 1-D
+    Observed = vegan::specnumber(cnt_mat),
+    Chao1    = apply(cnt_mat, 1, function(x) {
+                 obs <- sum(x > 0)
+                 n1  <- sum(x == 1)
+                 n2  <- sum(x == 2)
+                 if (n2 > 0) obs + n1^2 / (2 * n2) else obs + n1 * (n1 - 1) / 2
+               }),
+    Evenness = Shannon / log(Observed)
+  )
+
+# ── Descriptive statistics per timepoint ─────────────────────────────────────
+alpha_summary <- alpha_df %>%
+  group_by(timepoint) %>%
+  summarise(across(
+    c(Shannon, Simpson, Observed, Chao1, Evenness),
+    list(
+      mean   = ~mean(.x, na.rm = TRUE),
+      sd     = ~sd(.x,   na.rm = TRUE),
+      median = ~median(.x, na.rm = TRUE),
+      q25    = ~quantile(.x, 0.25, na.rm = TRUE),
+      q75    = ~quantile(.x, 0.75, na.rm = TRUE)
+    ),
+    .names = "{.col}__{.fn}"
+  ), .groups = "drop")
+
+alpha_summary %>%
+  pivot_longer(-timepoint, names_to = c("metric", "stat"), names_sep = "__") %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  mutate(summary = sprintf("%.3f ± %.3f  (%.3f [%.3f–%.3f])",
+                           mean, sd, median, q25, q75)) %>%
+  select(timepoint, metric, summary) %>%
+  pivot_wider(names_from = timepoint, values_from = summary) %>%
+  kable(caption = "Table S5. Alpha-diversity descriptive statistics per timepoint",
+        col.names = c("Metric", "S1 (Baseline)", "S2 (Post-RT)", "S3 (Post-CT)")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) %>%
+  row_spec(0, background = "#1F4E79", color = "white", bold = TRUE)
+```
+
+## 5.2 Global Kruskal-Wallis Test
+
+```{r alpha-kw}
+metrics <- c("Shannon", "Simpson", "Observed", "Chao1", "Evenness")
+
+kw_results <- map_dfr(metrics, function(m) {
+  kruskal.test(reformulate("timepoint", m), data = alpha_df) %>%
+    broom::tidy() %>%
+    mutate(metric = m, .before = 1)
+}) %>%
+  select(metric, statistic, p.value, parameter) %>%
+  mutate(
+    p.value  = round(p.value, 4),
+    statistic = round(statistic, 3),
+    significance = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    )
+  )
+
+kw_results %>%
+  kable(caption = "Kruskal-Wallis H test results across timepoints",
+        col.names = c("Metric", "H statistic", "p-value", "df", "Significance")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed")) %>%
+  row_spec(which(kw_results$p.value < 0.05), background = "#FFF9C4")
+```
+
+## 5.3 Pairwise Mann-Whitney U Tests
+
+```{r alpha-pairwise}
+pairs_list <- list(c("S1","S2"), c("S2","S3"), c("S1","S3"))
+
+mw_results <- map_dfr(metrics, function(m) {
+  map_dfr(pairs_list, function(pair) {
+    x <- alpha_df %>% filter(timepoint == pair[1]) %>% pull(!!sym(m))
+    y <- alpha_df %>% filter(timepoint == pair[2]) %>% pull(!!sym(m))
+    wt <- wilcox.test(x, y, exact = FALSE, alternative = "two.sided")
+    # Cohen's d
+    d  <- (mean(x, na.rm=T) - mean(y, na.rm=T)) /
+            sqrt((sd(x, na.rm=T)^2 + sd(y, na.rm=T)^2) / 2)
+    tibble(
+      metric     = m,
+      comparison = paste(pair, collapse = " vs "),
+      W          = wt$statistic,
+      p_value    = round(wt$p.value, 4),
+      cohens_d   = round(d, 3),
+      significance = case_when(
+        wt$p.value < 0.001 ~ "***",
+        wt$p.value < 0.01  ~ "**",
+        wt$p.value < 0.05  ~ "*",
+        TRUE               ~ "ns"
+      )
+    )
+  })
+})
+
+mw_results %>%
+  kable(caption = "Table S5b. Pairwise Mann-Whitney U test results with Cohen's d effect sizes") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed")) %>%
+  row_spec(which(mw_results$p_value < 0.05), background = "#E8F5E9") %>%
+  row_spec(0, background = "#1F4E79", color = "white", bold = TRUE)
+```
+
+## 5.4 Paired Wilcoxon Signed-Rank Test (n = 46)
+
+```{r alpha-paired}
+# ── Identify patients with all 3 timepoints ───────────────────────────────────
+paired_ids <- meta_df %>%
+  group_by(patient_id) %>%
+  summarise(n_tp = n_distinct(timepoint), .groups = "drop") %>%
+  filter(n_tp == 3) %>%
+  pull(patient_id)
+
+cat(sprintf("Patients with complete longitudinal data: n = %d\n", length(paired_ids)))
+
+alpha_paired <- alpha_df %>% filter(patient_id %in% paired_ids)
+
+wilcox_paired_results <- map_dfr(c("Shannon","Observed","Chao1"), function(m) {
+  map_dfr(pairs_list, function(pair) {
+    a <- alpha_paired %>% filter(timepoint == pair[1]) %>%
+           arrange(patient_id) %>% pull(!!sym(m))
+    b <- alpha_paired %>% filter(timepoint == pair[2]) %>%
+           arrange(patient_id) %>% pull(!!sym(m))
+    common_n <- min(length(a), length(b))
+    wt <- wilcox.test(a[1:common_n], b[1:common_n],
+                      paired = TRUE, exact = FALSE)
+    tibble(
+      metric     = m,
+      comparison = paste(pair, collapse = "→"),
+      V          = wt$statistic,
+      p_value    = round(wt$p.value, 4),
+      n_pairs    = common_n,
+      significance = case_when(
+        wt$p.value < 0.001 ~ "***",
+        wt$p.value < 0.01  ~ "**",
+        wt$p.value < 0.05  ~ "*",
+        TRUE               ~ "ns"
+      )
+    )
+  })
+})
+
+wilcox_paired_results %>%
+  kable(caption = "Table S5c. Paired Wilcoxon signed-rank test results (n = 46 patients)") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed")) %>%
+  row_spec(which(wilcox_paired_results$p_value < 0.05), background = "#E8F5E9") %>%
+  row_spec(0, background = "#1F4E79", color = "white", bold = TRUE)
+```
+
+## 5.5 Figure 1: Alpha-Diversity Violin + Boxplots
+
+```{r fig1-alpha, fig.width=18, fig.height=11, fig.cap="Figure 1. Alpha-diversity across treatment timepoints (S1 Baseline / S2 Post-RT / S3 Post-CT)."}
+metric_labels <- c(
+  Shannon  = "Shannon Diversity Index",
+  Simpson  = "Simpson Index (1-D)",
+  Observed = "Observed Species Richness",
+  Chao1    = "Chao1 Richness Estimator",
+  Evenness = "Pielou's Evenness (J')"
+)
+
+# Build pairwise comparisons for stat_compare_means
+stat_pairs <- list(c("S1","S2"), c("S2","S3"), c("S1","S3"))
+
+plot_list <- imap(metric_labels, function(ylab, m) {
+  ggplot(alpha_df, aes(x = timepoint, y = .data[[m]],
+                       fill = timepoint, colour = timepoint)) +
+    geom_violin(alpha = 0.25, width = 0.8, trim = FALSE) +
+    geom_boxplot(width = 0.25, alpha = 0.85, outlier.shape = NA,
+                 colour = "grey30") +
+    geom_jitter(width = 0.08, size = 1.8, alpha = 0.55,
+                shape = 16, colour = "grey40") +
+    stat_compare_means(
+      comparisons  = stat_pairs,
+      method       = "wilcox.test",
+      label        = "p.signif",
+      step.increase = 0.10,
+      tip.length   = 0.01,
+      size         = 4
+    ) +
+    stat_compare_means(
+      method    = "kruskal.test",
+      label     = "p.format",
+      label.x   = 0.7,
+      label.y   = Inf,
+      vjust     = 2.2,
+      size      = 3.5,
+      colour    = "#555555",
+      fontface  = "italic",
+      label.prefix = "KW: "
+    ) +
+    scale_fill_manual(values = PAL, labels = LBLS) +
+    scale_colour_manual(values = PAL, labels = LBLS) +
+    scale_x_discrete(labels = LBLS) +
+    labs(
+      title  = ylab,
+      x      = NULL,
+      y      = ylab,
+      fill   = "Timepoint",
+      colour = "Timepoint"
+    ) +
+    theme_larc() +
+    theme(
+      axis.text.x  = element_text(angle = 15, hjust = 1, size = 9),
+      legend.position = "none"
+    )
+})
+
+# Combine with shared legend
+wrap_plots(plot_list, ncol = 3) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title    = "Alpha-Diversity Analysis Across Treatment Timepoints",
+    subtitle = "LARC patients receiving TNT  |  S1: Baseline · S2: Post-Radiotherapy · S3: Post-Chemotherapy",
+    theme = theme(
+      plot.title    = element_text(size = 16, face = "bold", colour = "#1F4E79"),
+      plot.subtitle = element_text(size = 11, colour = "#555555")
+    )
+  ) &
+  theme(legend.position = "bottom")
+```
+
+## 5.6 Figure 2: Paired Longitudinal Trajectories
+
+```{r fig2-paired, fig.width=14, fig.height=6.5, fig.cap="Figure 2. Paired alpha-diversity trajectories (n = 46 patients)."}
+alpha_paired_long <- alpha_paired %>%
+  select(patient_id, timepoint, Shannon, Observed) %>%
+  pivot_longer(c(Shannon, Observed), names_to = "metric", values_to = "value") %>%
+  mutate(metric = factor(metric,
+                         levels = c("Shannon","Observed"),
+                         labels = c("Shannon Diversity Index",
+                                    "Observed Species Richness")))
+
+# Summary stats for overlay
+paired_summary <- alpha_paired_long %>%
+  group_by(metric, timepoint) %>%
+  summarise(mean_val = mean(value, na.rm = TRUE),
+            sem_val  = sd(value, na.rm = TRUE) / sqrt(n()),
+            .groups  = "drop")
+
+ggplot() +
+  # Individual patient trajectories
+  geom_line(data = alpha_paired_long,
+            aes(x = timepoint, y = value, group = patient_id),
+            colour = "#BDBDBD", linewidth = 0.6, alpha = 0.45) +
+  # Mean ± SEM
+  geom_errorbar(data = paired_summary,
+                aes(x = timepoint, ymin = mean_val - sem_val,
+                    ymax = mean_val + sem_val, colour = timepoint),
+                width = 0.12, linewidth = 1.2) +
+  geom_line(data = paired_summary,
+            aes(x = timepoint, y = mean_val, group = metric),
+            colour = "black", linewidth = 1.0, linetype = "dashed") +
+  geom_point(data = paired_summary,
+             aes(x = timepoint, y = mean_val, colour = timepoint),
+             size = 5, shape = 19) +
+  # Wilcoxon comparisons
+  stat_compare_means(
+    data        = alpha_paired_long,
+    aes(x = timepoint, y = value),
+    comparisons = stat_pairs,
+    method      = "wilcox.test",
+    paired      = TRUE,
+    label       = "p.signif",
+    step.increase = 0.12,
+    size        = 4.5
+  ) +
+  facet_wrap(~metric, scales = "free_y") +
+  scale_colour_manual(values = PAL, labels = LBLS) +
+  scale_x_discrete(labels = LBLS) +
+  labs(
+    title    = "Paired Alpha-Diversity Trajectories Across Treatment",
+    subtitle = sprintf("n = %d patients with complete longitudinal data (S1/S2/S3)", length(paired_ids)),
+    x        = NULL,
+    y        = "Diversity Value",
+    colour   = "Timepoint"
+  ) +
+  theme_larc() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+```
+
+---
+
+# 6. Beta-Diversity Analysis
+
+## 6.1 Compute Distance Matrices
+
+```{r beta-distances}
+# ── Bray-Curtis dissimilarity (abundance-based) ───────────────────────────────
+bc_dist  <- vegan::vegdist(rat_mat, method = "bray")
+
+# ── Jaccard dissimilarity (presence/absence) ──────────────────────────────────
+pa_mat   <- (rat_mat > 0) * 1
+jac_dist <- vegan::vegdist(pa_mat, method = "jaccard", binary = TRUE)
+
+# ── Within- and between-group dispersions ────────────────────────────────────
+bc_disp  <- vegan::betadisper(bc_dist,  group = meta_df$timepoint)
+jac_disp <- vegan::betadisper(jac_dist, group = meta_df$timepoint)
+
+dispersion_summary <- tibble(
+  Timepoint   = names(bc_disp$group.distances),
+  BC_dispersion  = round(bc_disp$group.distances, 4),
+  Jac_dispersion = round(jac_disp$group.distances, 4)
+)
+
+# ── Between-group mean distances ──────────────────────────────────────────────
+bc_mat_full <- as.matrix(bc_dist)
+between_distances <- map_dfr(list(c("S1","S2"), c("S2","S3"), c("S1","S3")),
+  function(pair) {
+    i1 <- which(meta_df$timepoint == pair[1])
+    i2 <- which(meta_df$timepoint == pair[2])
+    vals <- bc_mat_full[i1, i2]
+    tibble(comparison = paste(pair, collapse=" vs "),
+           mean_BC = round(mean(vals), 4),
+           sd_BC   = round(sd(vals),   4))
+  })
+
+# Within-group
+within_distances <- map_dfr(c("S1","S2","S3"), function(tp) {
+  idx  <- which(meta_df$timepoint == tp)
+  sub  <- bc_mat_full[idx, idx]
+  vals <- sub[upper.tri(sub)]
+  tibble(comparison = sprintf("Within %s", tp),
+         mean_BC = round(mean(vals), 4),
+         sd_BC   = round(sd(vals),   4))
+})
+
+bind_rows(within_distances, between_distances) %>%
+  kable(caption = "Table S6. Bray-Curtis within- and between-group mean dissimilarities") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed")) %>%
+  row_spec(0, background = "#1F4E79", color = "white", bold = TRUE)
+```
+
+## 6.2 PERMANOVA
+
+```{r permanova}
+set.seed(42)
+
+perm_bc  <- vegan::adonis2(bc_dist  ~ timepoint, data = meta_df,
+                            permutations = 999, method = "bray")
+perm_jac <- vegan::adonis2(jac_dist ~ timepoint, data = meta_df,
+                            permutations = 999, method = "jaccard")
+
+cat("── PERMANOVA: Bray-Curtis ──────────────────────────────\n")
+print(perm_bc)
+
+cat("\n── PERMANOVA: Jaccard ──────────────────────────────────\n")
+print(perm_jac)
+
+# PERMDISP test for homogeneity of dispersion
+perm_disp_bc  <- permutest(bc_disp,  permutations = 999)
+perm_disp_jac <- permutest(jac_disp, permutations = 999)
+
+cat("\n── PERMDISP: Bray-Curtis dispersion homogeneity ────────\n")
+print(perm_disp_bc)
+```
+
+## 6.3 PCoA Ordination
+
+```{r beta-pcoa}
+# ── PCoA via vegan::capscale() ────────────────────────────────────────────────
+pcoa_bc  <- vegan::wcmdscale(bc_dist,  eig = TRUE)
+pcoa_jac <- vegan::wcmdscale(jac_dist, eig = TRUE)
+
+# Variance explained
+ve_bc  <- round(pcoa_bc$eig  / sum(pcoa_bc$eig[pcoa_bc$eig > 0])  * 100, 1)
+ve_jac <- round(pcoa_jac$eig / sum(pcoa_jac$eig[pcoa_jac$eig > 0]) * 100, 1)
+
+# Ordination data frames
+ord_bc <- as_tibble(pcoa_bc$points[, 1:2],  .name_repair = "minimal") %>%
+  set_names(c("PC1","PC2")) %>%
+  bind_cols(meta_df)
+
+ord_jac <- as_tibble(pcoa_jac$points[, 1:2], .name_repair = "minimal") %>%
+  set_names(c("PC1","PC2")) %>%
+  bind_cols(meta_df)
+```
+
+## 6.4 CLR-PCA
+
+```{r clr-pca}
+# ── Centre log-ratio transformation ──────────────────────────────────────────
+rat_pseudo <- rat_mat + 1e-10   # pseudocount
+clr_mat    <- t(apply(rat_pseudo, 1, function(x) log(x) - mean(log(x))))
+
+pca_clr    <- prcomp(clr_mat, center = FALSE, scale. = FALSE)
+ve_pca     <- round(summary(pca_clr)$importance[2, 1:2] * 100, 1)
+
+ord_pca <- as_tibble(pca_clr$x[, 1:2]) %>%
+  bind_cols(meta_df)
+```
+
+## 6.5 Figure 3: Beta-Diversity Panel
+
+```{r fig3-beta, fig.width=18, fig.height=13, fig.cap="Figure 3. Beta-diversity analysis across treatment timepoints."}
+# ── Helper: ordination scatter plot ──────────────────────────────────────────
+ord_plot <- function(df, xlab, ylab, title, permanova_p) {
+  centroids <- df %>%
+    group_by(timepoint) %>%
+    summarise(PC1 = mean(PC1), PC2 = mean(PC2), .groups = "drop")
+
+  ggplot(df, aes(x = PC1, y = PC2, colour = timepoint, fill = timepoint)) +
+    stat_ellipse(aes(group = timepoint), type = "norm",
+                 alpha = 0.12, geom = "polygon", level = 0.68) +
+    geom_point(aes(shape = timepoint), size = 2.5, alpha = 0.75) +
+    geom_point(data = centroids, size = 5, shape = 8,
+               aes(colour = timepoint), stroke = 1.5) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "#CCCCCC") +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "#CCCCCC") +
+    scale_colour_manual(values = PAL, labels = LBLS) +
+    scale_fill_manual(values   = PAL, labels = LBLS) +
+    scale_shape_manual(values  = c(16,15,17), labels = LBLS) +
+    annotate("text", x = Inf, y = -Inf, hjust = 1.05, vjust = -0.5,
+             label = sprintf("PERMANOVA: p = %.3f", permanova_p),
+             fontface = "italic", size = 3.5, colour = "#333333") +
+    labs(title = title, x = xlab, y = ylab,
+         colour = "Timepoint", fill = "Timepoint", shape = "Timepoint") +
+    theme_larc()
+}
+
+p_bc  <- ord_plot(ord_bc,
+                  sprintf("PC1 (%.1f%%)", ve_bc[1]),
+                  sprintf("PC2 (%.1f%%)", ve_bc[2]),
+                  "PCoA — Bray-Curtis",
+                  perm_bc$`Pr(>F)`[1])
+
+p_jac <- ord_plot(ord_jac,
+                  sprintf("PC1 (%.1f%%)", ve_jac[1]),
+                  sprintf("PC2 (%.1f%%)", ve_jac[2]),
+                  "PCoA — Jaccard (Presence/Absence)",
+                  perm_jac$`Pr(>F)`[1])
+
+p_pca <- ord_plot(ord_pca,
+                  sprintf("PC1 (%.1f%%)", ve_pca[1]),
+                  sprintf("PC2 (%.1f%%)", ve_pca[2]),
+                  "PCA — CLR-Transformed Abundances",
+                  NA) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.05, vjust = -0.5,
+           label = "Aitchison geometry (CLR)",
+           fontface = "italic", size = 3.5, colour = "#333333")
+
+# ── BC distance boxplot ───────────────────────────────────────────────────────
+bc_long <- as.matrix(bc_dist) %>%
+  as.data.frame() %>%
+  rownames_to_column("sample_i") %>%
+  pivot_longer(-sample_i, names_to = "sample_j", values_to = "bc") %>%
+  filter(sample_i < sample_j) %>%
+  left_join(meta_df %>% rename(sample_i = sample_id, tp_i = timepoint),
+            by = "sample_i") %>%
+  left_join(meta_df %>% rename(sample_j = sample_id, tp_j = timepoint),
+            by = "sample_j") %>%
+  mutate(comparison = case_when(
+    as.character(tp_i) == as.character(tp_j) ~
+      paste0("Within ", tp_i),
+    TRUE ~
+      paste0(pmin(as.character(tp_i), as.character(tp_j)), " vs ",
+             pmax(as.character(tp_i), as.character(tp_j)))
+  ))
+
+p_box <- ggplot(bc_long, aes(x = comparison, y = bc,
+                              fill = comparison)) +
+  geom_boxplot(alpha = 0.8, outlier.size = 0.8, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c(
+    "Within S1" = PAL["S1"], "Within S2" = PAL["S2"],
+    "Within S3" = PAL["S3"], "S1 vs S2" = "#7B1FA2",
+    "S1 vs S3" = "#C62828", "S2 vs S3" = "#00838F"
+  )) +
+  labs(title = "BC Dissimilarity: Within vs Between Groups",
+       x = NULL, y = "Bray-Curtis Dissimilarity") +
+  theme_larc() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1),
+        legend.position = "none")
+
+# ── Dispersion bar chart ──────────────────────────────────────────────────────
+p_disp <- dispersion_summary %>%
+  pivot_longer(-Timepoint, names_to = "metric", values_to = "dispersion") %>%
+  mutate(Timepoint = factor(Timepoint, levels = TP_LEVELS)) %>%
+  ggplot(aes(x = Timepoint, y = dispersion, fill = Timepoint)) +
+  geom_col(position = "dodge", alpha = 0.85, width = 0.55) +
+  facet_wrap(~metric, labeller = labeller(
+    metric = c(BC_dispersion = "Bray-Curtis", Jac_dispersion = "Jaccard"))) +
+  scale_fill_manual(values = PAL, labels = LBLS) +
+  scale_x_discrete(labels = LBLS) +
+  labs(title = "Within-Group Dispersion per Timepoint",
+       x = NULL, y = "Mean Distance to Centroid") +
+  theme_larc() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+
+(p_bc | p_jac | p_pca) / (p_box | p_disp) +
+  plot_annotation(
+    title    = "Beta-Diversity Analysis Across Treatment Timepoints",
+    subtitle = "LARC patients receiving TNT  |  S1: Baseline · S2: Post-RT · S3: Post-CT",
+    theme    = theme(
+      plot.title    = element_text(size = 16, face = "bold", colour = "#1F4E79"),
+      plot.subtitle = element_text(size = 11, colour = "#555555")
+    )
+  )
+```
+
+---
+
+# 7. Species Composition
+
+## 7.1 Top 20 Species
+
+```{r composition-top20}
+# ── Mean relative abundance per timepoint ────────────────────────────────────
+tp_means <- map_dfr(c("S1","S2","S3"), function(tp) {
+  idx <- which(meta_df$timepoint == tp)
+  tibble(
+    timepoint = tp,
+    species   = sp_names,
+    mean_ra   = colMeans(rat_mat[idx, , drop = FALSE])
+  )
+})
+
+# Top 20 overall
+top20_sp <- tp_means %>%
+  group_by(species) %>%
+  summarise(overall_mean = mean(mean_ra), .groups = "drop") %>%
+  slice_max(overall_mean, n = 20) %>%
+  pull(species)
+
+top20_df <- tp_means %>%
+  filter(species %in% top20_sp) %>%
+  mutate(
+    timepoint = factor(timepoint, levels = TP_LEVELS, labels = LBLS),
+    species   = factor(species,   levels = rev(top20_sp))
+  )
+```
+
+## 7.2 Figure 4: Stacked Bar + Heatmap
+
+```{r fig4-composition, fig.width=18, fig.height=8, fig.cap="Figure 4. Species-level compositional changes (top 20 species)."}
+# ── Colour palette for 20 species ────────────────────────────────────────────
+sp_colors <- colorRampPalette(brewer.pal(12, "Set3"))(20)
+
+# Panel A: Stacked bar
+p_stack <- tp_means %>%
+  filter(species %in% top20_sp) %>%
+  mutate(timepoint = factor(timepoint, levels = TP_LEVELS, labels = LBLS),
+         species   = factor(species, levels = top20_sp)) %>%
+  ggplot(aes(x = timepoint, y = mean_ra, fill = species)) +
+  geom_col(width = 0.6, colour = "white", linewidth = 0.2) +
+  scale_fill_manual(values = sp_colors) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title = "A  Stacked Species Composition",
+       x = NULL, y = "Mean Relative Abundance",
+       fill = "Species") +
+  theme_larc() +
+  theme(legend.text = element_text(size = 7),
+        legend.key.size = unit(0.4, "cm"))
+
+# Panel B: Heatmap (pheatmap)
+hm_mat <- tp_means %>%
+  filter(species %in% top20_sp) %>%
+  pivot_wider(names_from = timepoint, values_from = mean_ra) %>%
+  column_to_rownames("species") %>%
+  as.matrix()
+
+# Truncate long species names for display
+rownames(hm_mat) <- str_trunc(rownames(hm_mat), 40)
+
+pheatmap(
+  hm_mat,
+  color            = colorRampPalette(c("white","#FFF3E0","#FF6D00","#B71C1C"))(100),
+  cluster_rows     = TRUE,
+  cluster_cols     = FALSE,
+  display_numbers  = TRUE,
+  number_format    = "%.4f",
+  number_color     = "black",
+  fontsize_number  = 8,
+  fontsize_row     = 9,
+  fontsize_col     = 11,
+  angle_col        = 45,
+  border_color     = "white",
+  main             = "B  Heatmap: Mean Relative Abundance (Top 20)",
+  labels_col       = LBLS[c("S1","S2","S3")]
+)
+```
+
+## 7.3 Figure 5: Longitudinal Trajectories (Top 24 Dynamic Species)
+
+```{r fig5-trajectories, fig.width=18, fig.height=14, fig.cap="Figure 5. Longitudinal dynamics of the 24 most dynamically changing species."}
+# ── Select top 24 by range across timepoints ──────────────────────────────────
+sp_range <- tp_means %>%
+  group_by(species) %>%
+  summarise(range_val = max(mean_ra) - min(mean_ra), .groups = "drop") %>%
+  slice_max(range_val, n = 24) %>%
+  pull(species)
+
+# Raw distributions per species per TP (for error bars & KW test)
+ra_long <- as_tibble(rat_mat) %>%
+  bind_cols(meta_df) %>%
+  pivot_longer(all_of(sp_names), names_to = "species", values_to = "rel_abund") %>%
+  filter(species %in% sp_range) %>%
+  mutate(timepoint = factor(timepoint, levels = TP_LEVELS))
+
+traj_summary <- ra_long %>%
+  group_by(species, timepoint) %>%
+  summarise(mean_ra = mean(rel_abund),
+            sem_ra  = sd(rel_abund) / sqrt(n()),
+            .groups = "drop")
+
+# KW p-values per species
+kw_sp <- ra_long %>%
+  group_by(species) %>%
+  summarise(
+    kw_p = kruskal.test(rel_abund ~ timepoint)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(kw_sig = case_when(
+    kw_p < 0.001 ~ "***",
+    kw_p < 0.01  ~ "**",
+    kw_p < 0.05  ~ "*",
+    TRUE         ~ "ns"
+  ))
+
+traj_summary <- left_join(traj_summary, kw_sp, by = "species") %>%
+  mutate(sp_label = paste0(str_trunc(species, 28), "\n(", kw_sig, ")"))
+
+ggplot(traj_summary, aes(x = timepoint, y = mean_ra,
+                          group = species, colour = timepoint)) +
+  geom_ribbon(aes(ymin = mean_ra - sem_ra, ymax = mean_ra + sem_ra,
+                  fill = timepoint), alpha = 0.15, colour = NA) +
+  geom_line(aes(group = 1), colour = "#333333", linewidth = 0.8) +
+  geom_point(size = 3, shape = 19) +
+  facet_wrap(~sp_label, scales = "free_y", ncol = 6) +
+  scale_colour_manual(values = PAL, labels = LBLS) +
+  scale_fill_manual(values   = PAL, labels = LBLS) +
+  scale_x_discrete(labels = c("S1","S2","S3")) +
+  labs(
+    title    = "Longitudinal Dynamics of Top 24 Most Variable Species",
+    subtitle = "Mean ± SEM  |  Kruskal-Wallis significance annotated in panel headers",
+    x        = NULL,
+    y        = "Mean Relative Abundance",
+    colour   = "Timepoint", fill = "Timepoint"
+  ) +
+  theme_larc(base_size = 9) +
+  theme(
+    strip.text      = element_text(size = 7.5, face = "bold"),
+    axis.text.x     = element_text(size = 8),
+    legend.position = "bottom"
+  )
+```
+
+---
+
+# 8. Prevalence Analysis
+
+## 8.1 Figure 6: Species Prevalence
+
+```{r fig6-prevalence, fig.width=14, fig.height=8, fig.cap="Figure 6. Species prevalence across treatment timepoints (top 20 species)."}
+prev_df <- map_dfr(c("S1","S2","S3"), function(tp) {
+  idx <- which(meta_df$timepoint == tp)
+  tibble(
+    timepoint  = tp,
+    species    = sp_names,
+    prevalence = colMeans(rat_mat[idx, , drop = FALSE] > 0)
+  )
+})
+
+# Top 20 by max prevalence
+top20_prev <- prev_df %>%
+  group_by(species) %>%
+  summarise(max_prev = max(prevalence), .groups = "drop") %>%
+  slice_max(max_prev, n = 20) %>%
+  pull(species)
+
+prev_df %>%
+  filter(species %in% top20_prev) %>%
+  mutate(
+    timepoint = factor(timepoint, levels = TP_LEVELS, labels = LBLS),
+    species   = factor(str_trunc(species, 35), levels = rev(str_trunc(top20_prev, 35)))
+  ) %>%
+  ggplot(aes(x = species, y = prevalence, fill = timepoint)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65,
+           alpha = 0.88) +
+  scale_fill_manual(values = PAL) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, 1.05)) +
+  coord_flip() +
+  labs(
+    title    = "Species Prevalence Across Treatment Timepoints",
+    subtitle = "Top 20 most prevalent species  |  Prevalence = proportion of samples with detection > 0",
+    x        = NULL,
+    y        = "Prevalence (% of samples)",
+    fill     = "Timepoint"
+  ) +
+  theme_larc() +
+  theme(legend.position = "top")
+```
+
+```{r prevalence-summary}
+# Core microbiome contraction summary
+prev_summary <- prev_df %>%
+  group_by(timepoint) %>%
+  summarise(
+    n_detected     = sum(prevalence > 0),
+    n_prev50       = sum(prevalence > 0.50),
+    n_prev20       = sum(prevalence > 0.20),
+    mean_prevalence = mean(prevalence),
+    .groups = "drop"
+  )
+
+prev_summary %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  kable(caption = "Core microbiome prevalence summary by timepoint",
+        col.names = c("Timepoint","Total detected","In >50% samples",
+                      "In >20% samples","Mean prevalence/species")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed")) %>%
+  row_spec(0, background = "#1F4E79", color = "white", bold = TRUE)
+```
+
+---
+
+# 9. LEfSe-Style LDA Analysis
+
+## 9.1 Multi-Group LDA
+
+```{r lefse-multigroup}
+run_lefse <- function(ra_matrix, group_labels, kw_alpha = 0.05) {
+  species  <- colnames(ra_matrix)
+  groups   <- levels(factor(group_labels))
+  
+  results <- map_dfr(seq_along(species), function(i) {
+    sp_vals  <- ra_matrix[, i]
+    grp_list <- split(sp_vals, group_labels)
+    
+    # Skip if all zero
+    if (all(map_dbl(grp_list, sum) == 0)) return(NULL)
+    
+    # Kruskal-Wallis
+    kw_p <- tryCatch(
+      kruskal.test(sp_vals ~ factor(group_labels))$p.value,
+      error = function(e) NA_real_
+    )
+    if (is.na(kw_p) || kw_p > kw_alpha) return(NULL)
+    
+    means    <- map_dbl(grp_list, mean)
+    enriched <- names(which.max(means))
+    
+    # LDA score
+    grand_var  <- var(sp_vals) + 1e-10
+    btw_var    <- var(means)
+    lda_score  <- log10(1 + max(means) * 1e4) * (btw_var / grand_var)^0.3
+    
+    tibble(
+      species   = species[i],
+      enriched  = enriched,
+      lda_score = lda_score,
+      kw_p      = kw_p,
+      S1_mean   = means["S1"],
+      S2_mean   = means["S2"],
+      S3_mean   = means["S3"]
+    )
+  }, .progress = FALSE)
+  
+  results %>% arrange(desc(lda_score))
+}
+
+lda_results <- run_lefse(as.matrix(rat_mat), as.character(meta_df$timepoint))
+
+cat(sprintf("Total significant species: %d\n", nrow(lda_results)))
+cat("Per group:\n")
+print(table(lda_results$enriched))
+
+lda_results %>%
+  slice_head(n = 20) %>%
+  mutate(across(where(is.numeric), ~round(.x, 4))) %>%
+  kable(caption = "Table S7. Top LEfSe LDA results (multi-group)",
+        col.names = c("Species","Enriched in","LDA Score","KW p",
+                      "S1 Mean","S2 Mean","S3 Mean")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed")) %>%
+  row_spec(which(lda_results$enriched[1:20] == "S1"), background = "#E3F2FD") %>%
+  row_spec(which(lda_results$enriched[1:20] == "S2"), background = "#FFF3E0") %>%
+  row_spec(which(lda_results$enriched[1:20] == "S3"), background = "#E8F5E9") %>%
+  row_spec(0, background = "#1F4E79", color = "white", bold = TRUE)
+```
+
+## 9.2 Figure 7: Multi-Group LDA Bar Chart
+
+```{r fig7-lda-multigroup, fig.width=13, fig.height=9, fig.cap="Figure 7. LEfSe multi-group LDA — top differentially abundant species."}
+top_per_group <- 10
+
+lda_plot_df <- lda_results %>%
+  group_by(enriched) %>%
+  slice_max(lda_score, n = top_per_group) %>%
+  ungroup() %>%
+  arrange(enriched, lda_score) %>%
+  mutate(
+    species_short = str_trunc(species, 38),
+    species_short = factor(species_short, levels = unique(species_short)),
+    enriched      = factor(enriched, levels = TP_LEVELS)
+  )
+
+ggplot(lda_plot_df, aes(x = lda_score, y = species_short, fill = enriched)) +
+  geom_col(width = 0.72, alpha = 0.88, colour = "white") +
+  geom_text(aes(label = enriched, x = lda_score + 0.003),
+            hjust = 0, size = 3, fontface = "bold",
+            colour = lda_plot_df %>% pull(enriched) %>%
+              { PAL[as.character(.)] }) +
+  scale_fill_manual(values = PAL, labels = LBLS) +
+  facet_wrap(~enriched, scales = "free_y", ncol = 1,
+             labeller = labeller(enriched = LBLS)) +
+  labs(
+    title    = "LEfSe-Style LDA — Multi-Group Comparison (S1 vs S2 vs S3)",
+    subtitle = sprintf("Top %d species per timepoint  |  KW p < 0.05", top_per_group),
+    x        = "LDA Score (log-scaled effect size)",
+    y        = NULL,
+    fill     = "Enriched in"
+  ) +
+  theme_larc() +
+  theme(legend.position = "right",
+        strip.text = element_text(face = "bold", size = 11))
+```
+
+## 9.3 Pairwise LEfSe
+
+```{r lefse-pairwise}
+run_pairwise_lda <- function(ra_matrix, group_labels, g1, g2, alpha = 0.05) {
+  idx    <- which(group_labels %in% c(g1, g2))
+  sub_ra <- ra_matrix[idx, ]
+  sub_lbl <- group_labels[idx]
+  
+  map_dfr(seq_len(ncol(sub_ra)), function(i) {
+    v1 <- sub_ra[sub_lbl == g1, i]
+    v2 <- sub_ra[sub_lbl == g2, i]
+    if (sum(v1) == 0 && sum(v2) == 0) return(NULL)
+    wt <- tryCatch(
+      wilcox.test(v1, v2, exact = FALSE, alternative = "two.sided"),
+      error = function(e) NULL
+    )
+    if (is.null(wt) || wt$p.value > alpha) return(NULL)
+    m1 <- mean(v1); m2 <- mean(v2)
+    tibble(
+      species  = colnames(sub_ra)[i],
+      enriched = if (m1 > m2) g1 else g2,
+      log2fc   = log2((max(m1,m2)+1e-10) / (min(m1,m2)+1e-10)),
+      p_value  = wt$p.value,
+      g1_mean  = m1, g2_mean = m2
+    )
+  }) %>% arrange(desc(log2fc))
+}
+
+lda_12 <- run_pairwise_lda(as.matrix(rat_mat), as.character(meta_df$timepoint), "S1","S2")
+lda_23 <- run_pairwise_lda(as.matrix(rat_mat), as.character(meta_df$timepoint), "S2","S3")
+lda_13 <- run_pairwise_lda(as.matrix(rat_mat), as.character(meta_df$timepoint), "S1","S3")
+
+cat(sprintf("Pairwise — S1 vs S2: %d | S2 vs S3: %d | S1 vs S3: %d\n",
+            nrow(lda_12), nrow(lda_23), nrow(lda_13)))
+```
+
+## 9.4 Figure 8: Pairwise LDA Bidirectional Bars
+
+```{r fig8-lda-pairwise, fig.width=20, fig.height=9, fig.cap="Figure 8. Pairwise LEfSe analysis."}
+make_pairwise_plot <- function(lda_df, g1, g2, title, n_top = 8) {
+  if (is.null(lda_df) || nrow(lda_df) == 0) {
+    return(ggplot() + labs(title = title) +
+             annotate("text", x=0.5, y=0.5, label="No significant\ndifferences",
+                      size=5) + theme_larc())
+  }
+  
+  top_df <- bind_rows(
+    lda_df %>% filter(enriched == g1) %>% slice_max(log2fc, n = n_top),
+    lda_df %>% filter(enriched == g2) %>% slice_max(log2fc, n = n_top)
+  ) %>%
+    mutate(
+      score_dir     = if_else(enriched == g2, log2fc, -log2fc),
+      species_short = str_trunc(species, 33),
+      species_short = fct_reorder(species_short, score_dir)
+    )
+  
+  ggplot(top_df, aes(x = score_dir, y = species_short,
+                      fill = enriched)) +
+    geom_col(width = 0.72, alpha = 0.88, colour = "white") +
+    geom_vline(xintercept = 0, colour = "black", linewidth = 0.8) +
+    scale_fill_manual(values = PAL[c(g1,g2)],
+                      labels = LBLS[c(g1,g2)]) +
+    labs(
+      title = title,
+      x     = paste0("← ", LBLS[g1], "     log₂FC     ", LBLS[g2], " →"),
+      y     = NULL,
+      fill  = "Enriched in"
+    ) +
+    theme_larc(base_size = 10) +
+    theme(legend.position = "bottom",
+          axis.text.y = element_text(size = 8.5))
+}
+
+p_12 <- make_pairwise_plot(lda_12, "S1", "S2", "S1 vs S2 — Post-RT Effect")
+p_23 <- make_pairwise_plot(lda_23, "S2", "S3", "S2 vs S3 — Post-CT Effect")
+p_13 <- make_pairwise_plot(lda_13, "S1", "S3", "S1 vs S3 — Overall TNT Effect")
+
+p_12 | p_23 | p_13
+```
+
+---
+
+# 10. Volcano Plot Analysis
+
+## 10.1 Figure 9: Volcano Plots
+
+```{r fig9-volcano, fig.width=19, fig.height=7.5, fig.cap="Figure 9. Volcano plots for pairwise differential abundance."}
+run_volcano <- function(ra_matrix, group_labels, g1, g2, sp_nm) {
+  map_dfr(seq_len(ncol(ra_matrix)), function(i) {
+    v1 <- ra_matrix[group_labels == g1, i]
+    v2 <- ra_matrix[group_labels == g2, i]
+    if (sum(v1)==0 && sum(v2)==0) return(NULL)
+    wt <- tryCatch(
+      wilcox.test(v1, v2, exact = FALSE, alternative = "two.sided"),
+      error = function(e) NULL
+    )
+    if (is.null(wt)) return(NULL)
+    m1 <- mean(v1)+1e-10; m2 <- mean(v2)+1e-10
+    tibble(
+      species = sp_nm[i],
+      log2fc  = log2(m2 / m1),
+      p_value = wt$p.value,
+      neg_log_p = -log10(wt$p.value + 1e-300)
+    )
+  })
+}
+
+make_volcano <- function(vdf, g1, g2, title) {
+  if (is.null(vdf) || nrow(vdf) == 0)
+    return(ggplot() + labs(title = title) + theme_larc())
+  
+  vdf <- vdf %>%
+    mutate(
+      status = case_when(
+        p_value < 0.05 & log2fc >  1 ~ "up",
+        p_value < 0.05 & log2fc < -1 ~ "down",
+        TRUE                          ~ "ns"
+      ),
+      colour = case_when(
+        status == "up"   ~ PAL[g2],
+        status == "down" ~ PAL[g1],
+        TRUE             ~ "#BDBDBD"
+      )
+    )
+  
+  top_labels <- vdf %>%
+    arrange(desc(neg_log_p)) %>%
+    slice_head(n = 8)
+  
+  n_up   <- sum(vdf$status == "up")
+  n_down <- sum(vdf$status == "down")
+  
+  ggplot(vdf, aes(x = log2fc, y = neg_log_p)) +
+    geom_point(aes(colour = status), size = 1.8, alpha = 0.75,
+               shape = 16) +
+    geom_label_repel(data = top_labels,
+                     aes(label = str_trunc(species, 22)),
+                     size = 2.8, max.overlaps = 12,
+                     box.padding = 0.35, point.padding = 0.3,
+                     segment.colour = "#777777", segment.size = 0.4,
+                     fill = "white", alpha = 0.85) +
+    geom_hline(yintercept = -log10(0.05),
+               linetype = "dashed", colour = "#999999", linewidth = 0.8) +
+    geom_vline(xintercept = c(-1, 1),
+               linetype = "dashed", colour = "#DDDDDD", linewidth = 0.8) +
+    scale_colour_manual(
+      values = c(up = PAL[g2], down = PAL[g1], ns = "#BDBDBD"),
+      labels = c(up   = paste0("Enriched in ", LBLS[g2], " (n=", n_up,")"),
+                 down = paste0("Enriched in ", LBLS[g1], " (n=", n_down,")"),
+                 ns   = "Not significant")
+    ) +
+    labs(
+      title    = title,
+      subtitle = sprintf("↑%s: n=%d  |  ↑%s: n=%d",
+                         LBLS[g2], n_up, LBLS[g1], n_down),
+      x        = "log₂ Fold Change",
+      y        = "−log₁₀(p-value)",
+      colour   = NULL
+    ) +
+    theme_larc() +
+    theme(legend.position = "bottom",
+          legend.text = element_text(size = 8.5))
+}
+
+v12 <- run_volcano(as.matrix(rat_mat), as.character(meta_df$timepoint), "S1","S2", sp_names)
+v23 <- run_volcano(as.matrix(rat_mat), as.character(meta_df$timepoint), "S2","S3", sp_names)
+v13 <- run_volcano(as.matrix(rat_mat), as.character(meta_df$timepoint), "S1","S3", sp_names)
+
+make_volcano(v12,"S1","S2","S1 vs S2  (Post-RT Effect)") |
+make_volcano(v23,"S2","S3","S2 vs S3  (Post-CT Effect)") |
+make_volcano(v13,"S1","S3","S1 vs S3  (Overall TNT Effect)")
+```
+
+---
+
+# 11. Supplementary Tables Export
+
+```{r supplementary-export}
+# ── Export all results to Excel ───────────────────────────────────────────────
+library(openxlsx)
+
+wb <- createWorkbook()
+
+# S1: Demographics (already presented via gtsummary above)
+addWorksheet(wb, "S1_Demographics")
+writeData(wb, "S1_Demographics", patient_df)
+
+# S2: Tumour characteristics
+addWorksheet(wb, "S2_Tumour_Characteristics")
+writeData(wb, "S2_Tumour_Characteristics",
+          patient_df %>% select(case_id, tumor_location, tumor_size, cT, cN, stage))
+
+# S3: Treatment
+addWorksheet(wb, "S3_Treatment")
+writeData(wb, "S3_Treatment",
+          patient_df %>% select(case_id, rt_type, rt_dose, chemo_type,
+                                chemo_cycles, clinical_response,
+                                watchandwait, surgery_yn, surgery_mode))
+
+# S4: Sample summary
+addWorksheet(wb, "S4_Sample_Summary")
+writeData(wb, "S4_Sample_Summary", prev_summary)
+
+# S5: Alpha diversity
+addWorksheet(wb, "S5_Alpha_Diversity")
+writeData(wb, "S5_Alpha_Diversity", alpha_df)
+
+addWorksheet(wb, "S5b_Alpha_KW_Stats")
+writeData(wb, "S5b_Alpha_KW_Stats", kw_results)
+
+addWorksheet(wb, "S5c_Alpha_MW_Pairwise")
+writeData(wb, "S5c_Alpha_MW_Pairwise", mw_results)
+
+addWorksheet(wb, "S5d_Alpha_Paired_Wilcoxon")
+writeData(wb, "S5d_Alpha_Paired_Wilcoxon", wilcox_paired_results)
+
+# S6: Beta diversity
+addWorksheet(wb, "S6_Beta_Dispersion")
+writeData(wb, "S6_Beta_Dispersion",
+          bind_rows(within_distances, between_distances))
+
+# S7: LDA results
+addWorksheet(wb, "S7_LDA_Multigroup")
+writeData(wb, "S7_LDA_Multigroup", lda_results)
+
+addWorksheet(wb, "S7b_LDA_S1vS2")
+writeData(wb, "S7b_LDA_S1vS2", lda_12)
+
+addWorksheet(wb, "S7c_LDA_S2vS3")
+writeData(wb, "S7c_LDA_S2vS3", lda_23)
+
+addWorksheet(wb, "S7d_LDA_S1vS3")
+writeData(wb, "S7d_LDA_S1vS3", lda_13)
+
+# S8: Volcano results
+addWorksheet(wb, "S8_Volcano_S1vS2")
+writeData(wb, "S8_Volcano_S1vS2", v12)
+
+addWorksheet(wb, "S8b_Volcano_S2vS3")
+writeData(wb, "S8b_Volcano_S2vS3", v23)
+
+addWorksheet(wb, "S8c_Volcano_S1vS3")
+writeData(wb, "S8c_Volcano_S1vS3", v13)
+
+saveWorkbook(wb, "Supplementary_Tables.xlsx", overwrite = TRUE)
+cat("Supplementary tables exported to: Supplementary_Tables.xlsx\n")
+```
+
+---
+
+# 12. Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+*End of analysis — LARC TNT Gut Microbiome Study*  
+*King Hussein Cancer Center, Amman, Jordan*
